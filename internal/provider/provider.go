@@ -3,9 +3,11 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
@@ -31,10 +33,47 @@ func New(version string) func() provider.Provider {
 
 type providerModel struct {
 	Local *localModel `tfsdk:"local"`
+	SSH   *sshModel   `tfsdk:"ssh"`
 }
 
 type localModel struct {
 	Host types.String `tfsdk:"host"`
+}
+
+type sshModel struct {
+	Host                  types.String `tfsdk:"host"`
+	Port                  types.Int64  `tfsdk:"port"`
+	User                  types.String `tfsdk:"user"`
+	PrivateKey            types.String `tfsdk:"private_key"`
+	PrivateKeyPassphrase  types.String `tfsdk:"private_key_passphrase"`
+	Password              types.String `tfsdk:"password"`
+	HostKey               types.String `tfsdk:"host_key"`
+	InsecureIgnoreHostKey types.Bool   `tfsdk:"insecure_ignore_host_key"`
+	DockerSocket          types.String `tfsdk:"docker_socket"`
+}
+
+func (m *sshModel) unknown() bool {
+	for _, v := range []attr.Value{m.Host, m.Port, m.User, m.PrivateKey, m.PrivateKeyPassphrase,
+		m.Password, m.HostKey, m.InsecureIgnoreHostKey, m.DockerSocket} {
+		if v.IsUnknown() {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *sshModel) config() connection.SSHConfig {
+	return connection.SSHConfig{
+		Host:                  m.Host.ValueString(),
+		Port:                  int(m.Port.ValueInt64()),
+		User:                  m.User.ValueString(),
+		PrivateKey:            m.PrivateKey.ValueString(),
+		PrivateKeyPassphrase:  m.PrivateKeyPassphrase.ValueString(),
+		Password:              m.Password.ValueString(),
+		HostKey:               m.HostKey.ValueString(),
+		InsecureIgnoreHostKey: m.InsecureIgnoreHostKey.ValueBool(),
+		DockerSocket:          m.DockerSocket.ValueString(),
+	}
 }
 
 func (p *dockerComposeProvider) Metadata(_ context.Context, _ provider.MetadataRequest, resp *provider.MetadataResponse) {
@@ -58,6 +97,54 @@ func (p *dockerComposeProvider) Schema(_ context.Context, _ provider.SchemaReque
 					},
 				},
 			},
+			"ssh": schema.SingleNestedBlock{
+				MarkdownDescription: "Connect to a remote Docker host over SSH. The provider uses its own SSH client: " +
+					"credentials stay in memory and no `ssh` binary is needed.\n\n" +
+					"The Docker socket is reached through SSH stream-local forwarding, so the server must allow it " +
+					"(`AllowTcpForwarding` set to `yes` or `local`, the OpenSSH default). Project files are written over SFTP.",
+				Attributes: map[string]schema.Attribute{
+					"host": schema.StringAttribute{
+						MarkdownDescription: "Hostname or IP address of the SSH server.",
+						Optional:            true,
+					},
+					"port": schema.Int64Attribute{
+						MarkdownDescription: "SSH port. Defaults to `22`.",
+						Optional:            true,
+					},
+					"user": schema.StringAttribute{
+						MarkdownDescription: "SSH user. It needs access to the Docker socket and write access to the project directories.",
+						Optional:            true,
+					},
+					"private_key": schema.StringAttribute{
+						MarkdownDescription: "Private key in OpenSSH or PEM format, for example `tls_private_key.deploy.private_key_openssh`.",
+						Optional:            true,
+						Sensitive:           true,
+					},
+					"private_key_passphrase": schema.StringAttribute{
+						MarkdownDescription: "Passphrase of an encrypted `private_key`.",
+						Optional:            true,
+						Sensitive:           true,
+					},
+					"password": schema.StringAttribute{
+						MarkdownDescription: "Password authentication, used in addition to or instead of `private_key`.",
+						Optional:            true,
+						Sensitive:           true,
+					},
+					"host_key": schema.StringAttribute{
+						MarkdownDescription: "Accepted host keys, one per line, in `authorized_keys` format (`ssh-ed25519 AAAA...`) " +
+							"or `known_hosts` format. Required unless `insecure_ignore_host_key` is set.",
+						Optional: true,
+					},
+					"insecure_ignore_host_key": schema.BoolAttribute{
+						MarkdownDescription: "Accept any host key. This allows man-in-the-middle attacks; use it only for testing.",
+						Optional:            true,
+					},
+					"docker_socket": schema.StringAttribute{
+						MarkdownDescription: "Path of the Docker socket on the remote host. Defaults to `/var/run/docker.sock`.",
+						Optional:            true,
+					},
+				},
+			},
 		},
 	}
 }
@@ -69,15 +156,35 @@ func (p *dockerComposeProvider) Configure(ctx context.Context, req provider.Conf
 		return
 	}
 
-	local := connection.LocalConfig{}
-	if cfg.Local != nil {
-		local.Host = cfg.Local.Host.ValueString()
+	if cfg.Local != nil && cfg.SSH != nil {
+		resp.Diagnostics.AddError("Conflicting connection blocks", "Configure either a local or an ssh block, not both.")
+		return
 	}
-	data := &providerData{
-		connect: func(ctx context.Context) (*connection.Connection, error) {
+
+	var connect func(context.Context) (*connection.Connection, error)
+	switch {
+	case cfg.SSH != nil && cfg.SSH.unknown():
+		// Planning new resources needs no connection, so this only fails if a
+		// resource has to talk to the host before the values are known.
+		connect = func(context.Context) (*connection.Connection, error) {
+			return nil, errors.New("the ssh block depends on values that are not known yet")
+		}
+	case cfg.SSH != nil:
+		sshCfg := cfg.SSH.config()
+		connect = func(ctx context.Context) (*connection.Connection, error) {
+			return connection.SSH(ctx, sshCfg)
+		}
+	default:
+		local := connection.LocalConfig{}
+		if cfg.Local != nil {
+			local.Host = cfg.Local.Host.ValueString()
+		}
+		connect = func(ctx context.Context) (*connection.Connection, error) {
 			return connection.Local(ctx, local)
-		},
+		}
 	}
+
+	data := &providerData{connect: connect}
 	resp.ResourceData = data
 	resp.DataSourceData = data
 }
