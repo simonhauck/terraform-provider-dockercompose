@@ -4,8 +4,8 @@ resource "random_password" "db" {
 
 # Compose content as native HCL. Outputs of other resources can be used
 # directly, including values only known during apply.
-resource "dockercompose_project" "app" {
-  name = "app"
+resource "dockercompose_project" "inline" {
+  name = "app-inline"
 
   compose = yamlencode({
     services = {
@@ -25,8 +25,15 @@ resource "dockercompose_project" "app" {
   }
 }
 
-# An existing compose file works too.
-resource "dockercompose_project" "proxy" {
-  name    = "proxy"
-  compose = file("${path.module}/proxy/compose.yaml")
+# The same project kept in a regular compose.yaml next to this file. Tools
+# that understand compose files, such as Renovate, can then update the image
+# tags. Use file(), not templatefile(): ${DB_PASSWORD} is interpolated by
+# compose from env.
+resource "dockercompose_project" "from_file" {
+  name    = "app-from-file"
+  compose = file("${path.module}/compose.yaml")
+
+  env = {
+    DB_PASSWORD = random_password.db.result
+  }
 }

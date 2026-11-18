@@ -201,3 +201,39 @@ func stopService(t *testing.T, project, service string) {
 		}
 	}
 }
+
+// TestAccProject_exampleComposeFile plans the documented compose-file example,
+// so the example keeps loading as the provider evolves.
+func TestAccProject_exampleComposeFile(t *testing.T) {
+	composeFile, err := filepath.Abs("../../examples/resources/dockercompose_project/compose.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: fmt.Sprintf(`
+provider "dockercompose" {
+  local {}
+}
+
+resource "dockercompose_project" "app" {
+  name    = "app"
+  compose = file(%q)
+  env = {
+    DB_PASSWORD = "secret"
+  }
+}
+`, composeFile),
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: true,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PostApplyPostRefresh: []plancheck.PlanCheck{
+						plancheck.ExpectKnownValue("dockercompose_project.app", tfjsonpath.New("project_dir"), knownvalue.StringExact("/opt/dockercompose/app")),
+					},
+				},
+			},
+		},
+	})
+}
