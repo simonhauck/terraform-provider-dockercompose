@@ -1,0 +1,32 @@
+---
+page_title: "{{.Name}} {{.Type}} - {{.ProviderName}}"
+subcategory: ""
+description: |-
+{{ .Description | plainmarkdown | trimspace | prefixlines "  " }}
+---
+
+# {{.Name}} ({{.Type}})
+
+{{ .Description | trimspace }}
+
+## Example Usage
+
+Both resources deploy the same project: one writes the compose content as HCL, the other reads a regular
+`compose.yaml`. A plain compose file lets dependency tools such as
+[Renovate](https://docs.renovatebot.com/modules/manager/docker-compose/) keep its image tags up to date.
+
+{{ tffile "examples/resources/dockercompose_project/resource.tf" }}
+
+`compose.yaml`:
+
+{{ codefile "yaml" "examples/resources/dockercompose_project/compose.yaml" }}
+
+{{ .SchemaMarkdown | trimspace }}
+{{- if .HasImport }}
+
+## Import
+
+Import is supported using the following syntax:
+
+{{ codefile "shell" .ImportFile }}
+{{- end }}
