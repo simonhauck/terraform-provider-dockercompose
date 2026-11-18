@@ -1,0 +1,54 @@
+name: Checks
+
+on:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15
+
+  generate:
+    name: Generated docs are up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_wrapper: false
+      - run: go generate ./...
+      - name: Fail on diff
+        run: |
+          git diff --exit-code || {
+            echo "::error::Run 'make docs' and commit the result."
+            exit 1
+          }
+
+  test:
+    name: Unit and acceptance tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_wrapper: false
+      # The runner ships a Docker daemon; acceptance tests and testcontainers use it.
+      - run: make testacc
