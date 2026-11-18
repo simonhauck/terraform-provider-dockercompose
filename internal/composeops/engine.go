@@ -3,12 +3,14 @@ package composeops
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/compose-spec/compose-go/v2/dotenv"
 	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/flags"
@@ -115,10 +117,17 @@ func (e *Engine) Destroy(ctx context.Context, spec Spec, opts DestroyOptions) er
 		return fmt.Errorf("compose down %s: %w", spec.Name, err)
 	}
 	if opts.RemoveFiles {
-		for _, p := range []string{spec.ComposePath(), spec.EnvPath()} {
-			if err := e.conn.FS.RemoveAll(ctx, p); err != nil {
-				return fmt.Errorf("removing %s: %w", p, err)
-			}
+		return e.RemoveFiles(ctx, spec)
+	}
+	return nil
+}
+
+// RemoveFiles deletes the mirrored compose file and .env from the project
+// directory, and nothing else in it.
+func (e *Engine) RemoveFiles(ctx context.Context, spec Spec) error {
+	for _, p := range []string{spec.ComposePath(), spec.EnvPath()} {
+		if err := e.conn.FS.RemoveAll(ctx, p); err != nil {
+			return fmt.Errorf("removing %s: %w", p, err)
 		}
 	}
 	return nil
@@ -238,4 +247,42 @@ func healthyState(svc types.ServiceConfig, c api.ContainerSummary) bool {
 	default:
 		return false
 	}
+}
+
+// ErrNotFound means the Docker host has no container of the project.
+var ErrNotFound = errors.New("compose project not found")
+
+// Discover reconstructs a deployed project's spec from its mirrored files,
+// which the compose labels on its containers point to. Profiles are not
+// recorded on the host and come back empty.
+func (e *Engine) Discover(ctx context.Context, name string) (Spec, error) {
+	containers, err := e.compose.Ps(ctx, name, api.PsOptions{All: true})
+	if err != nil {
+		return Spec{}, fmt.Errorf("listing containers of %s: %w", name, err)
+	}
+	if len(containers) == 0 {
+		return Spec{}, fmt.Errorf("%w: %s", ErrNotFound, name)
+	}
+	labels := containers[0].Labels
+	spec := Spec{Name: name, ProjectDir: labels[api.WorkingDirLabel]}
+
+	composePath, _, _ := strings.Cut(labels[api.ConfigFilesLabel], ",")
+	content, err := e.conn.FS.ReadFile(ctx, composePath)
+	if err != nil {
+		return Spec{}, fmt.Errorf("reading compose file of %s: %w", name, err)
+	}
+	spec.Compose = string(content)
+
+	envContent, err := e.conn.FS.ReadFile(ctx, spec.EnvPath())
+	switch {
+	case connection.IsNotExist(err):
+	case err != nil:
+		return Spec{}, fmt.Errorf("reading %s: %w", spec.EnvPath(), err)
+	default:
+		spec.Env, err = dotenv.UnmarshalBytesWithLookup(envContent, func(string) (string, bool) { return "", false })
+		if err != nil {
+			return Spec{}, fmt.Errorf("parsing %s: %w", spec.EnvPath(), err)
+		}
+	}
+	return spec, nil
 }
