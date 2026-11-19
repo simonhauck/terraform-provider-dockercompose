@@ -8,9 +8,6 @@ Deploy Docker Compose projects to a server over SSH, straight from Terraform, wi
 
 It is built for setups like Terraform Cloud (HCP Terraform) runners. Those runners have no `docker` or `ssh` binary and no good place for key files, but they can still deploy to a plain Linux server running Docker.
 
-> [!NOTE]
-> The provider is under active development and not yet published to the Terraform Registry. The registry link above will work once the first release is out.
-
 ## Features
 
 - **Nothing to install on the runner.** Compose runs inside the provider (using the official Docker Compose Go SDK) and talks to the Docker Engine API. You don't need `docker`, `docker compose` or `ssh` on the machine running Terraform.
@@ -113,9 +110,3 @@ make docs      # regenerate docs/ from the schema and examples/
 ```
 
 Commit messages and PR titles follow [Conventional Commits](https://www.conventionalcommits.org/). [release-please](https://github.com/googleapis/release-please) turns them into versions and a changelog, and GoReleaser builds and signs the release binaries. Design decisions are recorded in [`docs/adr/`](docs/adr/).
-
-### Publishing to the Terraform Registry (one-time setup)
-
-1. Create a GPG key for signing. Add the private key and its passphrase as the `GPG_PRIVATE_KEY` and `GPG_PASSPHRASE` repository secrets.
-2. In the Terraform Registry, add the ASCII-armored public key under *User Settings → Signing Keys*.
-3. Make the repository public and publish it on [registry.terraform.io](https://registry.terraform.io). New releases are picked up automatically through the GitHub webhook.
