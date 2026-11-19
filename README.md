@@ -106,7 +106,8 @@ The Nix flake provides the whole toolchain:
 nix develop
 make build     # compile
 make test      # unit tests
-make testacc   # acceptance tests (need a Docker daemon; SSH tests use testcontainers)
+make testacc   # acceptance and end-to-end tests (need a Docker daemon; SSH tests use testcontainers)
+make teste2e   # only the end-to-end test: builds the provider and drives it with the terraform CLI
 make lint
 make docs      # regenerate docs/ from the schema and examples/
 ```
