@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/simonhauck/terraform-provider-dockercompose/compare/v0.1.0...v0.2.0) (2026-11-22)
+
+
+### Features
+
+* manage networks-only projects and show detailed drift ([#13](https://github.com/simonhauck/terraform-provider-dockercompose/issues/13)) ([0fab764](https://github.com/simonhauck/terraform-provider-dockercompose/commit/0fab764ffbe62c0622553136ea6e027a125523f4))
+
 ## 0.1.0 (2026-11-19)
 
 
