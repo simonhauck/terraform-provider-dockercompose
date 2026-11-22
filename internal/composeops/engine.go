@@ -17,6 +17,7 @@ import (
 	"github.com/docker/compose/v5/pkg/api"
 	"github.com/docker/compose/v5/pkg/compose"
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/client"
 
 	"github.com/simonhauck/terraform-provider-dockercompose/internal/connection"
 )
@@ -135,7 +136,8 @@ func (e *Engine) RemoveFiles(ctx context.Context, spec Spec) error {
 
 // Status is the observed state of a project on the Docker host.
 type Status struct {
-	// Exists is false when the host has no container of the project at all.
+	// Exists is false when the host has none of the project's containers,
+	// networks or volumes at all.
 	Exists bool
 	// Services maps each service to the state of its containers, e.g. "running"
 	// or "exited (1)". Multiple replicas are comma-separated.
@@ -150,14 +152,49 @@ type StatusOptions struct {
 	CheckFiles bool
 }
 
-// Status inspects the project's containers and reports drift from the spec.
-// It has no side effects.
+// Status inspects the project's containers and resources and reports drift
+// from the spec. It has no side effects.
 func (e *Engine) Status(ctx context.Context, spec Spec, opts StatusOptions) (Status, error) {
 	containers, err := e.compose.Ps(ctx, spec.Name, api.PsOptions{All: true})
 	if err != nil {
 		return Status{}, fmt.Errorf("listing containers of %s: %w", spec.Name, err)
 	}
+	project, err := Load(ctx, spec)
+	if err != nil {
+		return Status{}, err
+	}
+	networks, err := e.projectNetworks(ctx, spec.Name)
+	if err != nil {
+		return Status{}, err
+	}
+	volumes, err := e.projectVolumes(ctx, spec.Name)
+	if err != nil {
+		return Status{}, err
+	}
+
 	status := Status{Exists: len(containers) > 0, Services: map[string]string{}}
+	for _, key := range project.NetworkNames() {
+		network := project.Networks[key]
+		if network.External {
+			continue
+		}
+		if _, ok := networks[key]; !ok {
+			status.Drift = append(status.Drift, fmt.Sprintf("network %s is missing", network.Name))
+			continue
+		}
+		status.Exists = true
+	}
+	for _, key := range project.VolumeNames() {
+		volume := project.Volumes[key]
+		if volume.External {
+			continue
+		}
+		if _, ok := volumes[key]; !ok {
+			status.Drift = append(status.Drift, fmt.Sprintf("volume %s is missing", volume.Name))
+			continue
+		}
+		status.Exists = true
+	}
 	if !status.Exists {
 		return status, nil
 	}
@@ -175,13 +212,7 @@ func (e *Engine) Status(ctx context.Context, spec Spec, opts StatusOptions) (Sta
 		status.Services[name] = strings.Join(states, ", ")
 	}
 
-	project, err := Load(ctx, spec)
-	if err != nil {
-		return Status{}, err
-	}
-	names := project.ServiceNames()
-	slices.Sort(names)
-	for _, name := range names {
+	for _, name := range project.ServiceNames() {
 		svc := project.Services[name]
 		cs := byService[name]
 		if len(cs) == 0 {
@@ -205,25 +236,65 @@ func (e *Engine) Status(ctx context.Context, spec Spec, opts StatusOptions) (Sta
 	return status, nil
 }
 
+// projectNetworks returns the compose keys of the project's networks, as
+// recorded in the labels Compose puts on the resources it creates.
+func (e *Engine) projectNetworks(ctx context.Context, project string) (map[string]struct{}, error) {
+	res, err := e.conn.Docker.NetworkList(ctx, client.NetworkListOptions{
+		Filters: client.Filters{}.Add("label", api.ProjectLabel+"="+project),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing networks of %s: %w", project, err)
+	}
+	keys := make(map[string]struct{}, len(res.Items))
+	for _, network := range res.Items {
+		if _, relay := network.Labels[api.RelayNetworkLabel]; relay {
+			continue
+		}
+		if key := network.Labels[api.NetworkLabel]; key != "" {
+			keys[key] = struct{}{}
+		}
+	}
+	return keys, nil
+}
+
+// projectVolumes returns the compose keys of the project's volumes.
+func (e *Engine) projectVolumes(ctx context.Context, project string) (map[string]struct{}, error) {
+	res, err := e.conn.Docker.VolumeList(ctx, client.VolumeListOptions{
+		Filters: client.Filters{}.Add("label", api.ProjectLabel+"="+project),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing volumes of %s: %w", project, err)
+	}
+	keys := make(map[string]struct{}, len(res.Items))
+	for _, volume := range res.Items {
+		if key := volume.Labels[api.VolumeLabel]; key != "" {
+			keys[key] = struct{}{}
+		}
+	}
+	return keys, nil
+}
+
 func (e *Engine) fileDrift(ctx context.Context, spec Spec) ([]string, error) {
 	var drift []string
-	files := []struct {
-		path string
-		want []byte
-	}{
-		{spec.ComposePath(), []byte(spec.Compose)},
-		{spec.EnvPath(), spec.EnvFile()},
+	compose, err := e.conn.FS.ReadFile(ctx, spec.ComposePath())
+	switch {
+	case connection.IsNotExist(err):
+		drift = append(drift, fmt.Sprintf("%s is missing", spec.ComposePath()))
+	case err != nil:
+		return nil, fmt.Errorf("reading %s: %w", spec.ComposePath(), err)
+	case !bytes.Equal(compose, []byte(spec.Compose)):
+		drift = append(drift, describeFileChange(spec.ComposePath(), string(compose), spec.Compose))
 	}
-	for _, f := range files {
-		got, err := e.conn.FS.ReadFile(ctx, f.path)
-		switch {
-		case connection.IsNotExist(err):
-			drift = append(drift, fmt.Sprintf("%s is missing", f.path))
-		case err != nil:
-			return nil, fmt.Errorf("reading %s: %w", f.path, err)
-		case !bytes.Equal(got, f.want):
-			drift = append(drift, fmt.Sprintf("%s was modified", f.path))
-		}
+
+	env, err := e.conn.FS.ReadFile(ctx, spec.EnvPath())
+	switch {
+	case connection.IsNotExist(err):
+		drift = append(drift, fmt.Sprintf("%s is missing", spec.EnvPath()))
+	case err != nil:
+		return nil, fmt.Errorf("reading %s: %w", spec.EnvPath(), err)
+	case !bytes.Equal(env, spec.EnvFile()):
+		// Never include the content: env holds sensitive values.
+		drift = append(drift, fmt.Sprintf("%s was modified (contents are sensitive)", spec.EnvPath()))
 	}
 	return drift, nil
 }

@@ -182,7 +182,32 @@ func TestE2E_projectLifecycle(t *testing.T) {
 		return
 	}
 
-	t.Run("5 destroy removes containers and mirrored files but keeps volume data and other files", func(t *testing.T) {
+	t.Run("5 a hand-edited compose file shows the changed lines as drift", func(t *testing.T) {
+		compose := readRemote(t, files, composePath)
+		edited := strings.Replace(compose, `"image": "busybox:1.37"`, `"image": "busybox:1.36"`, 1)
+		if edited == compose {
+			t.Fatalf("%s does not contain the expected image tag:\n%s", composePath, compose)
+		}
+		writeRemote(t, files, composePath, edited)
+
+		out, code := tf.run(t, "plan", "-no-color", "-detailed-exitcode", "-out="+planFile)
+		if code != 2 {
+			t.Fatalf("plan exited with %d, want 2 (changes present)", code)
+		}
+		for _, want := range []string{
+			address + " will be updated in-place",
+			"/srv/" + name + "/compose.yaml was modified:",
+			`-    "image": "busybox:1.36"`,
+			`+    "image": "busybox:1.37"`,
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("plan output does not contain %q", want)
+			}
+		}
+		assertActions(t, tf.planActions(t, planFile), "update")
+	})
+
+	t.Run("6 destroy removes containers and mirrored files but keeps volume data and other files", func(t *testing.T) {
 		tf.mustRun(t, "destroy", "-auto-approve", "-no-color")
 		destroyed = true
 

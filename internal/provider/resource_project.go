@@ -51,6 +51,7 @@ type projectModel struct {
 	ID                     types.String `tfsdk:"id"`
 	Name                   types.String `tfsdk:"name"`
 	Compose                types.String `tfsdk:"compose"`
+	AllResources           types.Bool   `tfsdk:"all_resources"`
 	Env                    types.Map    `tfsdk:"env"`
 	Profiles               types.List   `tfsdk:"profiles"`
 	ProjectDir             types.String `tfsdk:"project_dir"`
@@ -60,6 +61,7 @@ type projectModel struct {
 	WaitTimeout            types.String `tfsdk:"wait_timeout"`
 	RemoveVolumesOnDestroy types.Bool   `tfsdk:"remove_volumes_on_destroy"`
 	ConfigHash             types.String `tfsdk:"config_hash"`
+	Drift                  types.String `tfsdk:"drift"`
 	Services               types.Map    `tfsdk:"services"`
 }
 
@@ -72,7 +74,8 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 		MarkdownDescription: "A Docker Compose project, deployed like `docker compose up -d`.\n\n" +
 			"Changes are applied in place: compose recreates only the services whose configuration changed. " +
 			"On every refresh the provider checks that each service has a running container (or, for one-shot services, " +
-			"one that exited successfully) and that the mirrored files are unchanged. Any difference shows up in the next plan.",
+			"one that exited successfully), that declared networks and volumes still exist, and that the mirrored files " +
+			"are unchanged. Any difference shows up in the next plan.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				MarkdownDescription: "The project name.",
@@ -93,6 +96,13 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 					"Relative paths resolve against `project_dir` on the Docker host. " +
 					"`${VAR}` references are interpolated from `env`, never from the environment of the machine running Terraform.",
 				Required: true,
+			},
+			"all_resources": schema.BoolAttribute{
+				MarkdownDescription: "Include resources that no service uses, like `docker compose --all-resources up`. " +
+					"Set this to deploy compose files that only define networks or volumes. Defaults to `false`.",
+				Optional: true,
+				Computed: true,
+				Default:  booldefault.StaticBool(false),
 			},
 			"env": schema.MapAttribute{
 				MarkdownDescription: "Interpolation variables, the equivalent of a `.env` file. Stored in state and written to `project_dir/.env` with mode `0600`.",
@@ -146,8 +156,14 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Default:             booldefault.StaticBool(false),
 			},
 			"config_hash": schema.StringAttribute{
-				MarkdownDescription: "Hash of the inputs that define the deployment. After a refresh that found drift, it starts with `drifted:` and names the differences.",
+				MarkdownDescription: "Hash of the inputs that define the deployment. After a refresh that found drift, it starts with `drifted:` and briefly names the differences; `drift` holds the details.",
 				Computed:            true,
+			},
+			"drift": schema.StringAttribute{
+				MarkdownDescription: "Details of the differences found during the last refresh, including a diff of a changed `compose.yaml`. " +
+					"Empty when the project is in sync. Drift makes the next plan propose an update.",
+				Computed:      true,
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"services": schema.MapAttribute{
 				MarkdownDescription: "State of each service's containers, for example `running` or `exited (0)`.",
@@ -220,11 +236,29 @@ func (r *projectResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 		plan.ConfigHash = types.StringUnknown()
 	}
 
-	if !req.State.Raw.IsNull() {
+	if req.State.Raw.IsNull() {
+		plan.Drift = types.StringNull()
+	} else {
 		var state projectModel
 		resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		// Keep the details from the last refresh in state so Terraform can
+		// show them as changes made outside of Terraform. When the plan will
+		// apply an update, mark the attribute unknown: apply repairs the
+		// drift and clears it.
+		plan.Drift = state.Drift
+		if plan.Drift.IsUnknown() {
+			plan.Drift = types.StringNull()
+		}
 		if !plan.ConfigHash.Equal(state.ConfigHash) {
 			plan.Services = types.MapUnknown(types.StringType)
+			if state.Drift.IsNull() || state.Drift.ValueString() == "" {
+				plan.Drift = types.StringNull()
+			} else {
+				plan.Drift = types.StringUnknown()
+			}
 		}
 	}
 	resp.Diagnostics.Append(resp.Plan.Set(ctx, &plan)...)
@@ -282,6 +316,7 @@ func (r *projectResource) apply(ctx context.Context, model *projectModel, diags 
 	}
 
 	model.ConfigHash = types.StringValue(spec.Hash())
+	model.Drift = types.StringNull()
 	model.Services = types.MapNull(types.StringType)
 	err = engine.Apply(ctx, spec, composeops.ApplyOptions{
 		WriteFiles:    model.WriteFiles.ValueBool(),
@@ -333,7 +368,7 @@ func (r *projectResource) Read(ctx context.Context, req resource.ReadRequest, re
 		return
 	}
 	if !status.Exists {
-		tflog.Info(ctx, "compose project has no containers, removing from state", map[string]any{"name": spec.Name})
+		tflog.Info(ctx, "compose project has no resources, removing from state", map[string]any{"name": spec.Name})
 		resp.State.RemoveResource(ctx)
 		return
 	}
@@ -343,9 +378,24 @@ func (r *projectResource) Read(ctx context.Context, req resource.ReadRequest, re
 	state.Services = services
 	if len(status.Drift) > 0 {
 		tflog.Info(ctx, "compose project drifted", map[string]any{"name": spec.Name, "drift": status.Drift})
-		state.ConfigHash = types.StringValue(driftPrefix + strings.Join(status.Drift, "; "))
+		state.ConfigHash = types.StringValue(driftPrefix + driftSummary(status.Drift))
+		state.Drift = types.StringValue(strings.Join(status.Drift, "\n\n"))
+	} else {
+		state.ConfigHash = types.StringValue(spec.Hash())
+		state.Drift = types.StringNull()
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+}
+
+// driftSummary condenses detailed drift entries to their first line, for the
+// compact marker stored in config_hash. The drift attribute keeps the details.
+func driftSummary(drift []string) string {
+	summaries := make([]string, len(drift))
+	for i, entry := range drift {
+		summary, _, _ := strings.Cut(entry, "\n")
+		summaries[i] = strings.TrimSuffix(summary, ":")
+	}
+	return strings.Join(summaries, "; ")
 }
 
 func (r *projectResource) readImported(ctx context.Context, engine *composeops.Engine, state *projectModel, diags *diag.Diagnostics) {
@@ -356,6 +406,7 @@ func (r *projectResource) readImported(ctx context.Context, engine *composeops.E
 		return
 	}
 	state.Compose = types.StringValue(spec.Compose)
+	state.AllResources = types.BoolValue(false)
 	state.ProjectDir = types.StringValue(spec.ProjectDir)
 	state.Profiles = types.ListNull(types.StringType)
 	if len(spec.Env) > 0 {
@@ -371,6 +422,7 @@ func (r *projectResource) readImported(ctx context.Context, engine *composeops.E
 	state.WaitTimeout = types.StringValue("5m")
 	state.RemoveVolumesOnDestroy = types.BoolValue(false)
 	state.ConfigHash = types.StringValue(spec.Hash())
+	state.Drift = types.StringNull()
 }
 
 func (r *projectResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -401,12 +453,13 @@ func (r *projectResource) ImportState(ctx context.Context, req resource.ImportSt
 // specFromModel builds the engine spec. known is false while any input is
 // still unknown during planning.
 func specFromModel(ctx context.Context, m projectModel) (spec composeops.Spec, known bool, diags diag.Diagnostics) {
-	known = !m.Name.IsUnknown() && !m.Compose.IsUnknown() && !m.ProjectDir.IsUnknown() &&
-		!m.Env.IsUnknown() && !m.Profiles.IsUnknown()
+	known = !m.Name.IsUnknown() && !m.Compose.IsUnknown() && !m.AllResources.IsUnknown() &&
+		!m.ProjectDir.IsUnknown() && !m.Env.IsUnknown() && !m.Profiles.IsUnknown()
 	spec = composeops.Spec{
-		Name:       m.Name.ValueString(),
-		Compose:    m.Compose.ValueString(),
-		ProjectDir: m.ProjectDir.ValueString(),
+		Name:         m.Name.ValueString(),
+		Compose:      m.Compose.ValueString(),
+		AllResources: m.AllResources.ValueBool(),
+		ProjectDir:   m.ProjectDir.ValueString(),
 	}
 	if !m.Env.IsNull() && !m.Env.IsUnknown() {
 		// Elements can be unknown even when the map is known.

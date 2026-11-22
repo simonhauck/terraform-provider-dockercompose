@@ -15,8 +15,9 @@ It is built for setups like Terraform Cloud (HCP Terraform) runners. Those runne
 - **Inline configuration.** The compose content and its variables are ordinary attributes. Reference other resources' outputs directly, including secrets that are generated in the same run.
 - **Your compose files, unchanged.** Write the compose file as HCL with `yamlencode()`, or read an existing `compose.yaml` with `file()`. The second option lets tools like Renovate keep image tags up to date.
 - **Easy to debug on the server.** The compose file and `.env` are copied into a project directory on the host, so `docker compose ps`, `logs` and similar commands work there as usual. Moving away from the provider is just `docker compose up` in that directory.
-- **Drift detection.** Stopped or missing containers and hand-edited files show up in the next `plan`, with the reason.
+- **Drift detection.** Stopped or missing containers, networks and volumes, and hand-edited files show up in the next `plan`, with a diff of changed compose file lines.
 - **In-place updates.** Changing one value only recreates the services it affects, just like `docker compose up`.
+- **Resources without services.** Set `all_resources` to deploy top-level networks and volumes that no service uses, like `docker compose --all-resources up`.
 
 ## Example
 
@@ -93,7 +94,7 @@ What this provider does differently:
 | Compose files mirrored on the server for `docker compose` debugging | yes | no | no |
 | Scope | compose projects only | full Docker API | compose projects |
 
-If you need to manage individual Docker resources such as images, networks or volumes, use kreuzwerker/docker; it can be used alongside this provider. For example, create networks that your compose files then reference as `external`.
+If you need to manage individual Docker resources such as images that are not part of a compose file, use kreuzwerker/docker; it can be used alongside this provider. Top-level networks and volumes can be managed by a `dockercompose_project` itself with `all_resources = true`.
 
 ## Development
 

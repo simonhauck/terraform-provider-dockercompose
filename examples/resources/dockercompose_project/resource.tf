@@ -37,3 +37,18 @@ resource "dockercompose_project" "from_file" {
     DB_PASSWORD = random_password.db.result
   }
 }
+
+# A compose file without services. all_resources keeps the networks that no
+# service references, like `docker compose --all-resources up`.
+resource "dockercompose_project" "networks_only" {
+  name          = "networks-only"
+  all_resources = true
+
+  compose = yamlencode({
+    networks = {
+      private = {
+        driver = "bridge"
+      }
+    }
+  })
+}

@@ -38,6 +38,9 @@ type Spec struct {
 	Env map[string]string
 	// Profiles are the compose profiles to enable.
 	Profiles []string
+	// AllResources keeps networks, volumes and other resources that no service
+	// references, like `docker compose --all-resources`.
+	AllResources bool
 	// ProjectDir is the absolute, slash-separated project directory on the Docker host.
 	// Relative paths in the compose file resolve against it.
 	ProjectDir string
@@ -68,12 +71,13 @@ func (s Spec) Validate() error {
 // Hash identifies the spec's inputs. Two specs with the same hash deploy the same project.
 func (s Spec) Hash() string {
 	input := struct {
-		Name       string
-		Compose    string
-		Env        [][2]string
-		Profiles   []string
-		ProjectDir string
-	}{s.Name, s.Compose, sortedEnv(s.Env), s.Profiles, s.ProjectDir}
+		Name         string
+		Compose      string
+		Env          [][2]string
+		Profiles     []string
+		AllResources bool
+		ProjectDir   string
+	}{s.Name, s.Compose, sortedEnv(s.Env), s.Profiles, s.AllResources, s.ProjectDir}
 	b, err := json.Marshal(input)
 	if err != nil {
 		panic(err) // only strings: cannot fail
@@ -139,6 +143,9 @@ func Load(ctx context.Context, s Spec) (*types.Project, error) {
 	if project.Name == "" {
 		project.Name = s.Name
 	}
+	if !s.AllResources && len(project.Services) == 0 && len(project.Jobs) == 0 {
+		return nil, fmt.Errorf("compose project %q has no active services; set all_resources = true to manage resources that are not used by services", s.Name)
+	}
 
 	// The labels compose's own loader adds. They let compose find the project's
 	// containers, and point the docker CLI at the mirrored files on the host.
@@ -153,5 +160,8 @@ func Load(ctx context.Context, s Spec) (*types.Project, error) {
 		}
 		project.Services[name] = svc
 	}
-	return project.WithoutUnnecessaryResources(), nil
+	if !s.AllResources {
+		project = project.WithoutUnnecessaryResources()
+	}
+	return project, nil
 }
