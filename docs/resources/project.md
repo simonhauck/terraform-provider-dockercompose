@@ -3,20 +3,22 @@ page_title: "dockercompose_project Resource - dockercompose"
 subcategory: ""
 description: |-
   A Docker Compose project, deployed like docker compose up -d.
-  Changes are applied in place: compose recreates only the services whose configuration changed. On every refresh the provider checks that each service has a running container (or, for one-shot services, one that exited successfully) and that the mirrored files are unchanged. Any difference shows up in the next plan.
+  Changes are applied in place: compose recreates only the services whose configuration changed. On every refresh the provider checks that each service has a running container (or, for one-shot services, one that exited successfully), that declared networks and volumes still exist, and that the mirrored files are unchanged. Any difference shows up in the next plan.
 ---
 
 # dockercompose_project (Resource)
 
 A Docker Compose project, deployed like `docker compose up -d`.
 
-Changes are applied in place: compose recreates only the services whose configuration changed. On every refresh the provider checks that each service has a running container (or, for one-shot services, one that exited successfully) and that the mirrored files are unchanged. Any difference shows up in the next plan.
+Changes are applied in place: compose recreates only the services whose configuration changed. On every refresh the provider checks that each service has a running container (or, for one-shot services, one that exited successfully), that declared networks and volumes still exist, and that the mirrored files are unchanged. Any difference shows up in the next plan.
 
 ## Example Usage
 
-Both resources deploy the same project: one writes the compose content as HCL, the other reads a regular
+The first two resources deploy the same project: one writes the compose content as HCL, the other reads a regular
 `compose.yaml`. A plain compose file lets dependency tools such as
 [Renovate](https://docs.renovatebot.com/modules/manager/docker-compose/) keep its image tags up to date.
+The third resource shows a compose file that only manages a network: `all_resources` keeps resources
+that no service references.
 
 ```terraform
 resource "random_password" "db" {
@@ -58,6 +60,21 @@ resource "dockercompose_project" "from_file" {
     DB_PASSWORD = random_password.db.result
   }
 }
+
+# A compose file without services. all_resources keeps the networks that no
+# service references, like `docker compose --all-resources up`.
+resource "dockercompose_project" "networks_only" {
+  name          = "networks-only"
+  all_resources = true
+
+  compose = yamlencode({
+    networks = {
+      private = {
+        driver = "bridge"
+      }
+    }
+  })
+}
 ```
 
 `compose.yaml`:
@@ -83,6 +100,7 @@ services:
 
 ### Optional
 
+- `all_resources` (Boolean) Include resources that no service uses, like `docker compose --all-resources up`. Set this to deploy compose files that only define networks or volumes. Defaults to `false`.
 - `env` (Map of String, Sensitive) Interpolation variables, the equivalent of a `.env` file. Stored in state and written to `project_dir/.env` with mode `0600`.
 - `profiles` (List of String) Compose profiles to enable.
 - `project_dir` (String) Absolute project directory on the Docker host. Defaults to `/opt/dockercompose/<name>`. The compose file and `.env` are mirrored here when `write_files` is set, so `docker compose` works on the host.
@@ -94,7 +112,8 @@ services:
 
 ### Read-Only
 
-- `config_hash` (String) Hash of the inputs that define the deployment. After a refresh that found drift, it starts with `drifted:` and names the differences.
+- `config_hash` (String) Hash of the inputs that define the deployment. After a refresh that found drift, it starts with `drifted:` and briefly names the differences; `drift` holds the details.
+- `drift` (String) Details of the differences found during the last refresh, including a diff of a changed `compose.yaml`. Empty when the project is in sync. Drift makes the next plan propose an update.
 - `id` (String) The project name.
 - `services` (Map of String) State of each service's containers, for example `running` or `exited (0)`.
 
@@ -108,3 +127,8 @@ Import is supported using the following syntax:
 # the files mirrored into its project directory.
 terraform import dockercompose_project.app app
 ```
+
+Import reads the compose content and env back from the files mirrored into
+`project_dir`, so the project must have been deployed with `write_files`
+enabled. A project that has no containers, such as a networks-only project,
+cannot be imported yet because discovery relies on container labels.

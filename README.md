@@ -8,9 +8,6 @@ Deploy Docker Compose projects to a server over SSH, straight from Terraform, wi
 
 It is built for setups like Terraform Cloud (HCP Terraform) runners. Those runners have no `docker` or `ssh` binary and no good place for key files, but they can still deploy to a plain Linux server running Docker.
 
-> [!NOTE]
-> The provider is under active development and not yet published to the Terraform Registry. The registry link above will work once the first release is out.
-
 ## Features
 
 - **Nothing to install on the runner.** Compose runs inside the provider (using the official Docker Compose Go SDK) and talks to the Docker Engine API. You don't need `docker`, `docker compose` or `ssh` on the machine running Terraform.
@@ -18,8 +15,9 @@ It is built for setups like Terraform Cloud (HCP Terraform) runners. Those runne
 - **Inline configuration.** The compose content and its variables are ordinary attributes. Reference other resources' outputs directly, including secrets that are generated in the same run.
 - **Your compose files, unchanged.** Write the compose file as HCL with `yamlencode()`, or read an existing `compose.yaml` with `file()`. The second option lets tools like Renovate keep image tags up to date.
 - **Easy to debug on the server.** The compose file and `.env` are copied into a project directory on the host, so `docker compose ps`, `logs` and similar commands work there as usual. Moving away from the provider is just `docker compose up` in that directory.
-- **Drift detection.** Stopped or missing containers and hand-edited files show up in the next `plan`, with the reason.
+- **Drift detection.** Stopped or missing containers, networks and volumes, and hand-edited files show up in the next `plan`, with a diff of changed compose file lines.
 - **In-place updates.** Changing one value only recreates the services it affects, just like `docker compose up`.
+- **Resources without services.** Set `all_resources` to deploy top-level networks and volumes that no service uses, like `docker compose --all-resources up`.
 
 ## Example
 
@@ -96,7 +94,7 @@ What this provider does differently:
 | Compose files mirrored on the server for `docker compose` debugging | yes | no | no |
 | Scope | compose projects only | full Docker API | compose projects |
 
-If you need to manage individual Docker resources such as images, networks or volumes, use kreuzwerker/docker; it can be used alongside this provider. For example, create networks that your compose files then reference as `external`.
+If you need to manage individual Docker resources such as images that are not part of a compose file, use kreuzwerker/docker; it can be used alongside this provider. Top-level networks and volumes can be managed by a `dockercompose_project` itself with `all_resources = true`.
 
 ## Development
 
@@ -113,9 +111,3 @@ make docs      # regenerate docs/ from the schema and examples/
 ```
 
 Commit messages and PR titles follow [Conventional Commits](https://www.conventionalcommits.org/). [release-please](https://github.com/googleapis/release-please) turns them into versions and a changelog, and GoReleaser builds and signs the release binaries. Design decisions are recorded in [`docs/adr/`](docs/adr/).
-
-### Publishing to the Terraform Registry (one-time setup)
-
-1. Create a GPG key for signing. Add the private key and its passphrase as the `GPG_PRIVATE_KEY` and `GPG_PASSPHRASE` repository secrets.
-2. In the Terraform Registry, add the ASCII-armored public key under *User Settings → Signing Keys*.
-3. Make the repository public and publish it on [registry.terraform.io](https://registry.terraform.io). New releases are picked up automatically through the GitHub webhook.

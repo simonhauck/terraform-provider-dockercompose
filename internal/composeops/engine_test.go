@@ -112,6 +112,25 @@ func TestEngine_lifecycle(t *testing.T) {
 	if len(status.Drift) != 2 {
 		t.Errorf("want 2 drift entries (stopped container, edited file), got %q", status.Drift)
 	}
+	if drift := strings.Join(status.Drift, "\n"); !strings.Contains(drift, "was modified:") || !strings.Contains(drift, "-edited") {
+		t.Errorf("file drift has no compose diff:\n%s", drift)
+	}
+
+	// The .env file is drift too, but its contents must never be exposed.
+	if err := os.WriteFile(spec.EnvPath(), []byte("GREETING='secret-value'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	status, err = engine.Status(ctx, spec, StatusOptions{CheckFiles: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envDrift := strings.Join(status.Drift, "\n")
+	if !strings.Contains(envDrift, ".env was modified (contents are sensitive)") {
+		t.Errorf("env drift is not marked sensitive:\n%s", envDrift)
+	}
+	if strings.Contains(envDrift, "secret-value") {
+		t.Errorf("env drift leaks the file contents:\n%s", envDrift)
+	}
 
 	if err := engine.Destroy(ctx, spec, DestroyOptions{RemoveFiles: true}); err != nil {
 		t.Fatal(err)
@@ -128,6 +147,72 @@ func TestEngine_lifecycle(t *testing.T) {
 	}
 	if _, err := os.Stat(spec.ProjectDir); err != nil {
 		t.Errorf("project dir itself must be kept: %v", err)
+	}
+}
+
+func TestEngine_networksOnlyLifecycle(t *testing.T) {
+	engine, conn := newTestEngine(t)
+	ctx := t.Context()
+	name := fmt.Sprintf("tfdc-networks-%d", time.Now().UnixNano())
+	spec := Spec{
+		Name: name,
+		Compose: `
+networks:
+  private:
+    driver: bridge
+`,
+		AllResources: true,
+		ProjectDir:   t.TempDir(),
+	}
+	t.Cleanup(func() {
+		// t.Context() is already cancelled when cleanups run.
+		_ = engine.Destroy(context.Background(), spec, DestroyOptions{RemoveFiles: true}) //nolint:usetesting
+	})
+	opts := ApplyOptions{WriteFiles: true, Wait: true, WaitTimeout: 30 * time.Second}
+
+	if err := engine.Apply(ctx, spec, opts); err != nil {
+		t.Fatal(err)
+	}
+	status, err := engine.Status(ctx, spec, StatusOptions{CheckFiles: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Exists || len(status.Drift) != 0 {
+		t.Fatalf("after apply: want in sync, got %+v", status)
+	}
+	if len(status.Services) != 0 {
+		t.Errorf("services = %v, want none", status.Services)
+	}
+	networkID := projectNetworkID(t, conn, spec.Name, "private")
+
+	// Removing the network out of band shows up as drift and is repaired.
+	if _, err := conn.Docker.NetworkRemove(ctx, networkID, client.NetworkRemoveOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	status, err = engine.Status(ctx, spec, StatusOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(status.Drift) != 1 || !strings.Contains(status.Drift[0], "network") {
+		t.Errorf("want network drift, got %q", status.Drift)
+	}
+	if err := engine.Apply(ctx, spec, opts); err != nil {
+		t.Fatal(err)
+	}
+	projectNetworkID(t, conn, spec.Name, "private")
+
+	if err := engine.Destroy(ctx, spec, DestroyOptions{RemoveFiles: true}); err != nil {
+		t.Fatal(err)
+	}
+	status, err = engine.Status(ctx, spec, StatusOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Exists {
+		t.Errorf("after destroy: project still exists: %+v", status)
+	}
+	if _, err := os.Stat(spec.ComposePath()); !os.IsNotExist(err) {
+		t.Errorf("compose file not removed: %v", err)
 	}
 }
 
@@ -148,6 +233,26 @@ func containerID(t *testing.T, conn *connection.Connection, project, service str
 			names = append(names, strings.Join(c.Names, "/"))
 		}
 		t.Fatalf("want 1 container for %s/%s, got %v", project, service, names)
+	}
+	return res.Items[0].ID
+}
+
+func projectNetworkID(t *testing.T, conn *connection.Connection, project, network string) string {
+	t.Helper()
+	res, err := conn.Docker.NetworkList(t.Context(), client.NetworkListOptions{
+		Filters: client.Filters{}.
+			Add("label", "com.docker.compose.project="+project).
+			Add("label", "com.docker.compose.network="+network),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Items) != 1 {
+		names := make([]string, 0, len(res.Items))
+		for _, n := range res.Items {
+			names = append(names, n.Name)
+		}
+		t.Fatalf("want 1 network for %s/%s, got %v", project, network, names)
 	}
 	return res.Items[0].ID
 }

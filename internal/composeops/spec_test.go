@@ -94,6 +94,64 @@ services:
 	}
 }
 
+func TestLoad_allResources(t *testing.T) {
+	s := testSpec()
+	s.Compose = `
+services:
+  web: {image: nginx}
+networks:
+  unused: {driver: bridge}
+volumes:
+  unused:
+`
+	project, err := Load(t.Context(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := project.Networks["unused"]; ok {
+		t.Error("unused network kept without AllResources")
+	}
+	if _, ok := project.Volumes["unused"]; ok {
+		t.Error("unused volume kept without AllResources")
+	}
+
+	s.AllResources = true
+	project, err = Load(t.Context(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := project.Networks["unused"]; !ok {
+		t.Error("unused network missing with AllResources")
+	}
+	if _, ok := project.Volumes["unused"]; !ok {
+		t.Error("unused volume missing with AllResources")
+	}
+}
+
+func TestLoad_networksOnlyRequiresAllResources(t *testing.T) {
+	s := testSpec()
+	s.Compose = `
+networks:
+  private: {driver: bridge}
+`
+	_, err := Load(t.Context(), s)
+	if err == nil || !strings.Contains(err.Error(), "all_resources") {
+		t.Fatalf("want error mentioning all_resources, got %v", err)
+	}
+
+	s.AllResources = true
+	project, err := Load(t.Context(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(project.Services) != 0 {
+		t.Errorf("services = %v, want none", project.ServiceNames())
+	}
+	if _, ok := project.Networks["private"]; !ok {
+		t.Error("private network missing with AllResources")
+	}
+}
+
 func TestLoad_rejectsInvalidInput(t *testing.T) {
 	tests := map[string]func(*Spec){
 		"invalid yaml":     func(s *Spec) { s.Compose = "services: [" },
@@ -147,6 +205,11 @@ func TestHash(t *testing.T) {
 	b.Env["PASSWORD"] = "other"
 	if a.Hash() == b.Hash() {
 		t.Error("env change does not change hash")
+	}
+	b = testSpec()
+	b.AllResources = true
+	if a.Hash() == b.Hash() {
+		t.Error("all_resources change does not change hash")
 	}
 	if !strings.HasPrefix(a.Hash(), a.Hash()[:8]) || len(a.Hash()) != 64 {
 		t.Errorf("unexpected hash format %q", a.Hash())
